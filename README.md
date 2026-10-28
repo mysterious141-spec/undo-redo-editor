@@ -2,7 +2,7 @@
 
 A text editor with undo/redo built on **two stacks** (LIFO) and the **command pattern**.
 
-**Live demo:** https://YOUR-USERNAME.github.io/undo-redo-editor/
+**Live demo:** https://mysterious141-spec.github.io/undo-redo-editor/
 
 ## Why stacks?
 The most recent edit must be reversed first, which is exactly LIFO.
