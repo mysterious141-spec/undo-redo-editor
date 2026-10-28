@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Undo/Redo Editor</title>
+<style>
+  :root {
+    --bg: #e9eef3; --panel: #ffffff; --ink: #17212b; --muted: #5b6b7a;
+    --line: #cfd8e1; --undo: #0e7c86; --undo-soft: #dcf0f1;
+    --redo: #6b4fbb; --redo-soft: #e8e2f6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { margin: 0 0 20px; color: var(--muted); max-width: 60ch; }
+  .layout { display: grid; gap: 16px; grid-template-columns: 1.3fr 1fr; align-items: start; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; cursor: pointer; padding: 8px 14px;
+    border-radius: 8px; border: 1px solid transparent; color: #fff; }
+  button:focus-visible, textarea:focus-visible { outline: 3px solid #f2b705; outline-offset: 2px; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #undoBtn { background: var(--undo); }
+  #redoBtn { background: var(--redo); }
+  #clearBtn { background: transparent; color: var(--muted); border-color: var(--line); margin-left: auto; }
+  textarea { width: 100%; min-height: 260px; resize: vertical;
+    font: 16px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+  .hint { margin: 8px 0 0; font-size: 0.875rem; color: var(--muted); }
+  .stacks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .stack h2 { font-size: 1rem; margin: 0 0 8px; display: flex; justify-content: space-between; }
+  .stack h2 span { font-weight: 400; color: var(--muted); }
+  .stack ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+    gap: 4px; min-height: 120px; max-height: 340px; overflow-y: auto; }
+  .stack li { font: 0.8rem/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 6px 8px; border-radius: 6px; word-break: break-word; }
+  #undoList li { background: var(--undo-soft); border-left: 4px solid var(--undo); }
+  #redoList li { background: var(--redo-soft); border-left: 4px solid var(--redo); }
+  #undoList li.top { background: var(--undo); color: #fff; }
+  #redoList li.top { background: var(--redo); color: #fff; }
+  .empty { color: var(--muted); font-size: 0.8rem; padding: 6px 2px; }
+  .note { margin: 14px 0 0; font-size: 0.875rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Undo/Redo Editor</h1>
+  <p class="sub">Type, delete or paste anywhere in the text. Every edit is pushed onto a stack, and undo pops the most recent one first.</p>
+
+  <div class="layout">
+    <section class="panel" aria-label="Editor">
+      <div class="toolbar">
+        <button id="undoBtn" type="button">Undo</button>
+        <button id="redoBtn" type="button">Redo</button>
+        <button id="clearBtn" type="button">Clear all</button>
+      </div>
+      <textarea id="editor" spellcheck="false" aria-label="Text editor" placeholder="Start typing here..."></textarea>
+      <p class="hint">Shortcuts: Ctrl/Cmd+Z to undo, Ctrl+Y or Ctrl/Cmd+Shift+Z to redo.</p>
+    </section>
+
+    <section class="panel" aria-label="Stacks">
+      <div class="stacks">
+        <div class="stack">
+          <h2>Undo stack <span id="undoCount">0</span></h2>
+          <ol id="undoList"></ol>
+        </div>
+        <div class="stack">
+          <h2>Redo stack <span id="redoCount">0</span></h2>
+          <ol id="redoList"></ol>
+        </div>
+      </div>
+      <p class="note">Newest edit is on top. A new edit clears the redo stack, because that future no longer exists.</p>
+    </section>
+  </div>
+</main>
+
+<script>
+  const LIMIT = 100;
+  const ta = document.getElementById('editor');
+  const undoBtn = document.getElementById('undoBtn');
+  const redoBtn = document.getElementById('redoBtn');
+  const clearBtn = document.getElementById('clearBtn');
+
+  const undoStack = []; // top of the stack = last element
+  const redoStack = [];
+  let current = '';
+
+  function preview(s) {
+    const t = s.length > 12 ? s.slice(0, 12) + '...' : s;
+    return '"' + t.replace(/\n/g, '\\n') + '"';
+  }
+
+  // A command stores only the change: where it happened, what left, what arrived.
+  class EditCommand {
+    constructor(pos, removed, inserted) {
+      this.pos = pos; this.removed = removed; this.inserted = inserted;
+    }
+    execute() { apply(this.pos, this.removed.length, this.inserted); }
+    undo()    { apply(this.pos, this.inserted.length, this.removed); }
+    label() {
+      if (this.removed && this.inserted) return 'replace ' + preview(this.removed) + ' with ' + preview(this.inserted) + ' at ' + this.pos;
+      if (this.inserted) return 'insert ' + preview(this.inserted) + ' at ' + this.pos;
+      return 'delete ' + preview(this.removed) + ' at ' + this.pos;
+    }
+  }
+
+  function apply(pos, removeLen, insertText) {
+    current = current.slice(0, pos) + insertText + current.slice(pos + removeLen);
+    ta.value = current;
+    const caret = pos + insertText.length;
+    ta.setSelectionRange(caret, caret);
+  }
+
+  function pushEdit(cmd) {
+    undoStack.push(cmd);
+    if (undoStack.length > LIMIT) undoStack.shift(); // drop the oldest
+    redoStack.length = 0;                            // new edit invalidates redo
+    render();
+  }
+
+  function undo() {
+    if (!undoStack.length) return;
+    const cmd = undoStack.pop();
+    cmd.undo();
+    redoStack.push(cmd);
+    render();
+  }
+
+  function redo() {
+    if (!redoStack.length) return;
+    const cmd = redoStack.pop();
+    cmd.execute();
+    undoStack.push(cmd);
+    render();
+  }
+
+  // Work out what the user changed by comparing the old and new text.
+  ta.addEventListener('input', () => {
+    const prev = current;
+    const next = ta.value;
+    const max = Math.min(prev.length, next.length);
+    let start = 0;
+    while (start < max && prev[start] === next[start]) start++;
+    let tail = 0;
+    while (tail < max - start && prev[prev.length - 1 - tail] === next[next.length - 1 - tail]) tail++;
+    const removed = prev.slice(start, prev.length - tail);
+    const inserted = next.slice(start, next.length - tail);
+    current = next;
+    if (removed || inserted) pushEdit(new EditCommand(start, removed, inserted));
+  });
+
+  // Use our own stacks instead of the browser's built-in undo.
+  ta.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (k === 'y') { e.preventDefault(); redo(); }
+  });
+  ta.addEventListener('beforeinput', (e) => {
+    if (e.inputType === 'historyUndo') { e.preventDefault(); undo(); }
+    if (e.inputType === 'historyRedo') { e.preventDefault(); redo(); }
+  });
+
+  undoBtn.addEventListener('click', () => { undo(); ta.focus(); });
+  redoBtn.addEventListener('click', () => { redo(); ta.focus(); });
+  clearBtn.addEventListener('click', () => {
+    undoStack.length = 0; redoStack.length = 0;
+    current = ''; ta.value = '';
+    render(); ta.focus();
+  });
+
+  function renderList(listEl, stack, emptyText) {
+    listEl.textContent = '';
+    if (!stack.length) {
+      const p = document.createElement('li');
+      p.className = 'empty';
+      p.textContent = emptyText;
+      p.style.background = 'none'; p.style.border = 'none';
+      listEl.appendChild(p);
+      return;
+    }
+    for (let i = stack.length - 1; i >= 0; i--) {   // newest first
+      const li = document.createElement('li');
+      li.textContent = stack[i].label();
+      if (i === stack.length - 1) li.className = 'top';
+      listEl.appendChild(li);
+    }
+  }
+
+  function render() {
+    renderList(document.getElementById('undoList'), undoStack, 'Empty. Type to push an edit.');
+    renderList(document.getElementById('redoList'), redoStack, 'Empty. Undo to fill this.');
+    document.getElementById('undoCount').textContent = undoStack.length;
+    document.getElementById('redoCount').textContent = redoStack.length;
+    undoBtn.disabled = !undoStack.length;
+    redoBtn.disabled = !redoStack.length;
+  }
+
+  render();
+</script>
+</body>
+</html> 
